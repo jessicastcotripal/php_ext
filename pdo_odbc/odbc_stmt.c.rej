@@ -1,0 +1,74 @@
+--- odbc_stmt.c	2023-01-01 00:00:00.000000000 +0000
++++ odbc_stmt.c	2023-01-01 00:00:00.000000000 +0000
+@@ -641,17 +641,34 @@
+ {
+ 	pdo_odbc_stmt *S = (pdo_odbc_stmt*)stmt->driver_data;
+ 	pdo_odbc_column *C = &S->cols[colno];
++	SQLSMALLINT DataType;
+ 
+ 	/* if it is a column containing "long" data, perform late binding now */
+ 	if (C->is_long) {
+ 		SQLLEN orig_fetched_len = SQL_NULL_DATA;
+ 		RETCODE rc;
+ 
++		/* hj fix binary */
++		if (C->is_unicode) {
++			DataType = SQL_C_BINARY;
++		} else {
++			switch(C->coltype) {
++				case SQL_BINARY:
++				case SQL_VARBINARY:
++				case SQL_LONGVARBINARY:
++					DataType = SQL_C_BINARY;
++					break;
++				default:
++					DataType = SQL_C_CHAR;
++					break;
++			}
++		}
++
+ 		/* fetch it into C->data, which is allocated with a length
+ 		   of 256 bytes; if there is more to be had, we then allocate
+ 		   bigger buffer for the caller to free */
+ 
+-		rc = SQLGetData(S->stmt, colno+1, C->is_unicode ? SQL_C_BINARY : SQL_C_CHAR, C->data,
++		rc = SQLGetData(S->stmt, colno+1, DataType, C->data,  /* hj fix binary */
+ 			256, &C->fetched_len);
+ 		orig_fetched_len = C->fetched_len;
+ 
+@@ -675,10 +692,14 @@
+ 			zend_string *str = zend_string_init(C->data, 256, 0);
+ 			size_t used = 255; /* not 255; 256 bytes were allocated */
+ 
++			if (DataType == SQL_C_BINARY) {    /* hj fix binary */
++				used = 256;
++			}
++
+ 			do {
+ 				C->fetched_len = 0;
+ 				/* read block. 256 bytes => 255 bytes are actually read, the last 1 is NULL */
+-				rc = SQLGetData(S->stmt, colno+1, C->is_unicode ? SQL_C_BINARY : SQL_C_CHAR, buf2, 256, &C->fetched_len);
++				rc = SQLGetData(S->stmt, colno+1, DataType, buf2, 256, &C->fetched_len);  /* hj fix binary */
+ 
+ 				/* adjust `used` in case we have length info from the driver */
+ 				if (orig_fetched_len >= 0 && C->fetched_len >= 0) {
+@@ -694,7 +715,11 @@
+ 					   (if a driver fails to follow that and wrote less than 255 bytes to buf2, this will AV or read garbage into buf) */
+ 					str = zend_string_realloc(str, used + 256, 0);
+ 					memcpy(ZSTR_VAL(str) + used, buf2, 256);
++					if (DataType == SQL_C_BINARY) { /* hj fix binary */
++						used = used + 256;
++					} else {
+ 					used = used + 255;
++					}
+ 				} else if (rc==SQL_SUCCESS) {
+ 					str = zend_string_realloc(str, used + C->fetched_len, 0);
+ 					memcpy(ZSTR_VAL(str) + used, buf2, C->fetched_len);
+@@ -709,6 +734,7 @@
+ 			efree(buf2);
+ 
+ 			/* NULL terminate the buffer once, when finished, for use with the rest of PHP */
++			if (DataType == SQL_C_CHAR)  /* hj fix binary */
+ 			ZSTR_VAL(str)[used] = '\0';
+ 			ZVAL_STR(result, str);
+ 
